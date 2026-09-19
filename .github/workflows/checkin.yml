@@ -1,0 +1,27 @@
+name: daily-checkin
+
+on:
+  schedule:
+    - cron: "0 1 * * *"        # UTC 1:00 = 北京时间每天 9:00（GitHub 定时可能有几分钟延迟）
+  workflow_dispatch: {}         # 支持在 Actions 页面手动触发
+
+permissions:
+  contents: read
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run check-in
+        env:
+          SIJISHE_USER: ${{ secrets.SIJISHE_USER }}
+          SIJISHE_PASS: ${{ secrets.SIJISHE_PASS }}
+          SIJISHE_COOKIE: ${{ secrets.SIJISHE_COOKIE }}
+        run: python checkin.py
