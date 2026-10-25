@@ -24,7 +24,7 @@ import ssl
 import sys
 import time
 from http import cookiejar
-from urllib import parse, request as urlrequest
+from urllib import error as urlerror, parse, request as urlrequest
 
 PUBLISH_URL = "https://www.47447.net/"          # 官方发布页（拦截非浏览器请求，失败自动跳过）
 CANDIDATES = [                                   # 兜底地址列表，请与发布页保持一致
@@ -64,31 +64,50 @@ def _is_ssl_error(exc):
     return isinstance(reason, ssl.SSLError) or "CERTIFICATE" in str(reason).upper()
 
 
-def http(url, data=None, referer=None, timeout=30):
-    """GET（或表单 POST，data 传 dict），返回解码后的响应文本"""
-    global OPENER, VERIFY_SSL
-    for _ in range(2):
+def open_with_challenge(url, data=None, referer=None, timeout=30, tries=3):
+    """打开请求并自动通过站点防护挑战。
+
+    站点（Cloudflare/WAF）对无 Cookie 的首次请求返回 403 挑战页，
+    但挑战 Cookie 会随响应的 Set-Cookie 下发（无需执行其 JS），
+    因此 403 后带着 CookieJar 里的新 Cookie 重试即可通过。
+    返回响应对象；调用方自行 read()。
+    """
+    global VERIFY_SSL, OPENER
+    last_err = None
+    for _ in range(tries):
         body = parse.urlencode(data).encode("utf-8") if isinstance(data, dict) else data
         req = urlrequest.Request(url, data=body)
         if referer:
             req.add_header("Referer", referer)
         try:
-            resp = OPENER.open(req, timeout=timeout)
-            raw = resp.read()
-            m = re.search(r"charset=([\w-]+)", resp.headers.get("Content-Type", ""))
-            charset = m.group(1) if m else "utf-8"
-            try:
-                return raw.decode(charset, "replace")
-            except LookupError:
-                return raw.decode("utf-8", "replace")
+            return OPENER.open(req, timeout=timeout)
+        except urlerror.HTTPError as e:
+            if e.code == 403:
+                last_err = e
+                time.sleep(0.6)
+                continue
+            raise
         except urlrequest.URLError as e:
             if _is_ssl_error(e) and VERIFY_SSL:
                 print("  ⚠ 证书校验异常，本次运行改为跳过证书校验")
                 VERIFY_SSL = False
                 OPENER = build_opener(verify=False)
+                last_err = e
                 continue
             raise
-    raise RuntimeError("请求失败：" + url)
+    raise RuntimeError("请求失败（403 挑战重试 %d 次仍未通过）：%s" % (tries, url))
+
+
+def http(url, data=None, referer=None, timeout=30):
+    """GET（或表单 POST，data 传 dict），返回解码后的响应文本"""
+    resp = open_with_challenge(url, data=data, referer=referer, timeout=timeout)
+    raw = resp.read()
+    m = re.search(r"charset=([\w-]+)", resp.headers.get("Content-Type", ""))
+    charset = m.group(1) if m else "utf-8"
+    try:
+        return raw.decode(charset, "replace")
+    except LookupError:
+        return raw.decode("utf-8", "replace")
 
 
 def has_auth_cookie():
@@ -119,8 +138,8 @@ def parse_publish_lines():
 
 def ping_once(base):
     t0 = time.perf_counter()
-    req = urlrequest.Request(base + "/?_ping=" + str(int(time.time() * 1000)))
-    OPENER.open(req, timeout=PING_TIMEOUT).close()  # 拿到响应头即计时，不下载页面
+    open_with_challenge(base + "/?_ping=" + str(int(time.time() * 1000)),
+                        timeout=PING_TIMEOUT).close()  # 拿到响应头即计时，不下载页面
     return (time.perf_counter() - t0) * 1000
 
 
